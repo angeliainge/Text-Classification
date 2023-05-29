@@ -1,0 +1,620 @@
+---
+title: "CAPSTONE MACHINE LEARNING - CYBERBULLYING"
+author: "Inge Angelia"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2022-09-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(textclean)
+library(tokenizers)
+library(wordcloud)
+library(dplyr)
+library(devtools)
+library(katadasaR)
+library(tm)
+library(stringr)
+library(e1071)
+library(caret)
+library(keras)
+library(RVerbalExpressions)
+library(magrittr)
+library(textclean)
+library(tidyverse)
+library(tidytext)
+library(rsample)
+library(yardstick)
+library(SnowballC)
+library(partykit)
+library(ROCR)
+library(partykit)
+```
+# READ DATA
+```{r}
+df <- read.csv("data/train.csv")
+slang <- read.csv("data/colloquial-indonesian-lexicon.csv")
+head(df)
+```
+The dataset contains 10,535 tweets and 8 columns with information as follow:
+- bully: Classification of the tweet as Yes (Bully) and No (Not Bully)
+- tweet: Content of the tweet
+- individual: Whether the tweet is a cyberbully targeted toward certain individual (0 = no, 1 = yes)
+- group: Whether the tweet is a cyberbully targeted toward certain group of people (0 = no, 1 = yes)
+- gender: Whether the tweet is a cyberbully based on gender or cursing someone using words that are degrading to gender (0 = no, 1 = yes)
+- physical: Whether the tweet is a cyberbully based on physical deficiencies/differences or disability (0 = no, 1 = yes)
+- race: Whether the tweet is a cyberbully based on a human race or ethnicity (0 = no, 1 = yes)
+- religion: Whether the tweet is a cyberbully based on a religion, religious organization, or a particular creed (0 = no, 1 = yes)
+
+# DATA CLEANING
+## Check for any missing and duplicated values
+```{r}
+colSums(is.na(df))
+```
+
+```{r}
+df[duplicated(df$tweet),]
+df_clean <- df %>%
+  as.data.frame() %>%
+  distinct(tweet, .keep_all = T)
+```
+From the above processes, we know that there are no missing values in the dataset. However, there are 98 duplicated tweets (label = tweet) as people have the tendency on copy-and-paste news on twitter.
+
+We use the function distinct() to drop the duplicated tweet and saved it as df_clean, with the new number of rows 10,437.
+
+## Transform columns into their appropriate classes
+Next, we will transform the "bully, individual, group, gender, physical, race and religion" columns with as.factor() function
+```{r}
+df_clean <- df_clean %>% 
+  mutate(bully = as.factor(bully),
+         individual = as.factor(individual),
+         group = as.factor(group),
+         gender = as.factor(gender),
+         physical = as.factor(physical),
+         race = as.factor(race),
+         religion = as.factor(religion))
+```
+
+## Category with the most abusive and bullying tweets
+```{r}
+df_clean_bully <-  df_clean %>% filter(bully == "yes")
+
+df_clean_bully %>%
+  summary()
+```
+By sub-setting the data to only shows tweets that classify as "Bully", we then used the function summary() to generate the frequency from each category. In this case, 1 = Yes (bully) and 0 = No (no bully).
+
+Based on the summary, it is fair to say that the cyber bully tweets mainly attack towards certain "individual" and "group" with number of tweets 2818 and 1562 respectively. On the contrary, "physical" and "gender" are two of the categories that have the least amount of cyberbullying.
+
+What text or token can represent each cyberbully category?
+Firstly, let's pull the tweets from our df_clean dataset. Let's use head(20) to have better insights on the words. After we remove some words that are shown repeatedly that do not add any valuable insights to our data, we will pull the words by subsetting the label bully = yes to see what are the words that might represent cyber bullying
+```{r}
+df_clean %>% 
+  head(30) %>%
+  pull(tweet)
+```
+
+## Data Cleansing 2
+Let's remove the word "USER, RT and punctuations" which showed up a lot and does not hold any valuable meaning.
+```{r}
+df_clean$tweet <- gsub("USER", " ", df_clean$tweet)
+df_clean$tweet <- gsub("RT", " ", df_clean$tweet)
+df_clean$tweet <- gsub("[[:punct:] ]+", " ", df_clean$tweet)
+head(df_clean)
+
+```
+
+Afterwards, we should do some cleansing on removing certain elements that does not add any value to our data, i.e : dates, emojis, emails, emoticons, html, slangs, urls and tags/RT (@ and retweet). As the tweets are not by Institutions / Organisations, we use the replace_internet_slang() and replace all the slangs/abbreviations by using "Colloquial Indonesian Lexicon" from github. Additionally, as the text classification itself is case-sensitive, we should lower case all the tweets.
+
+```{r}
+df_clean$tweet <- df_clean$tweet %>% 
+  replace_tag() %>% 
+  replace_date(replacement = " ") %>% 
+  replace_email() %>% 
+  replace_emoji(.) %>% 
+  replace_emoticon(.) %>% 
+  replace_url() %>%
+  replace_html(.) %>% 
+  str_to_lower()
+
+df_clean$tweet[1:10437] <- replace_internet_slang(df_clean$tweet[1:10437], slang = paste0("\\b", slang$slang, "\\b"),
+                            replacement = slang$formal, ignore.case = TRUE)
+
+df_clean$tweet <- strip(df_clean$tweet)
+```
+
+
+```{r}
+df_clean %>% 
+  head(30) %>%
+  pull(tweet)
+```
+We can see that after cleansing, there are no more emojis (previously #28), punctuation, hash symbols (previously #26). I specifically did not remove the content of the hash tag itself (only the # symbol) as hash tags in most often times are useful when categorizing a topic that can be aggregated into a thread.
+Additionally, now all the abbreviations are gone, i.e #19 from "yg" to "yang", and #11 "kw" to "kau.
+
+Next, let's assign our df_clean data into new data set. I personally like to do this so I don't have to re-run all the chunks from the beginning in case I mess up my data set, especially where some chunks take a long of time to run (replace_internet_slang()). From now on we will start working with df_clean_2 and treat df_clean as our master file.
+```{r}
+df_clean_2 <- data.frame(df_clean)
+tracemem(df_clean) == tracemem(df_clean_2)
+
+saveRDS(df_clean_2, file = "df_clean_2.RDS")
+df_clean_2 <- readRDS("df_clean_2.RDS")
+```
+
+## Stemming, Stopwords and Tokenizing
+Now we will start with stemming, remove stopwords, tokenizing and creating a wordcloud.
+Stemming is done to transform all the words into its' root form, i.e "memakan" -> "makan". We will use the katadasaR library to do this. Afterwards, we will save it into df_clean_3 and saveRDS in the case the RStudio crashes, we can directly work using df_clean_3.RDS
+```{r}
+stemming <- function(x) {
+  paste(lapply(x, katadasar), collapse = " ")
+}
+
+df_clean_2$tweet[1:10437] <- lapply(tokenize_words(df_clean_2$tweet[1:10437]), stemming)
+
+df_clean_3 <- data.frame(df_clean_2)
+saveRDS(df_clean_3, file = "df_clean_3.RDS")
+
+df_clean_3 <- readRDS("df_clean_3.RDS")
+```
+We can see that all of the words are transformed into its' base form now. Let's start the tokenization process. This process breaks our sentences into words by words so that it can be counted by the system into the wordcloud later, i.e : 
+line #5 "yang kayak begini layak di tangkap" will be broken into "yang", "kayak", "begini", "layak", "di", "tangkap".
+Additionally, we will also do the stopwords process as the final step of our data cleansing. Stopwords are common words used in sentences that give context to the sentence itself but can be removed as they contain no crucial meaning in this project. They are usually conjunctions i.e : "dan", "tapi", "untuk", etc.
+
+```{r}
+stopwords <- readLines("data/stopwords-id.txt")
+
+df_clean_3$tweet <- df_clean_3$tweet %>% 
+  replace_html(symbol = FALSE) %>% 
+  replace_url(replacement = "")
+df_clean_3$tweet <- gsub("url", " ", df_clean_3$tweet)
+
+df_clean_3$tweet <- tokenize_words(df_clean_3$tweet, stopwords = stopwords)
+# df_clean_3$tweet <- as.character(df_clean_3$tweet)
+```
+We are finally done with the data cleansing, let's save it for the final time as df_clean_final, and save RDS as well.
+```{r}
+df_clean_final <- data.frame(df_clean_3)
+saveRDS(df_clean_final, file = "df_clean_final.RDS")
+df_clean_final <- readRDS("df_clean_final.RDS")
+df_clean_final$tweet[1:5]
+```
+
+Now, let's learn our dataset more by using wordcloud(). The df_clean_final dataset is the dataset that still contains both bully and not bully variable (10,437 rows)
+# WORDCLOUD AND FREQUENCY
+## Dataset General
+```{r}
+df_clean_final_corpus <- VCorpus(VectorSource(df_clean_final$tweet))
+
+df_clean_final_dtm <- DocumentTermMatrix(df_clean_final_corpus)
+inspect(df_clean_final_dtm)
+
+wordcloud(df_clean_final_corpus,max.words = 200, col=brewer.pal(8, "Set2"), scale=c(3,0.25))
+```
+
+```{r}
+cleanfinal_count <- as.data.frame(as.matrix(df_clean_final_dtm))
+cleanfinal_long <- pivot_longer(data = cleanfinal_count, cols = everything())
+final_cleanfinal <- cleanfinal_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+cleanfinal_cloud <- final_cleanfinal %>% 
+  filter(tot >= 50) %>% 
+  arrange(desc(tot))
+
+head(cleanfinal_cloud,30)
+```
+
+Let's see the words that are commonly used in the non-bully tweets
+## Non Bully
+```{r}
+df_clean_nobully <- df_clean_final %>% 
+  filter(bully == "no")
+
+df_clean_nobully_corpus <- VCorpus(VectorSource(df_clean_nobully$tweet))
+df_clean_nobully_dtm <- DocumentTermMatrix(df_clean_nobully_corpus)
+inspect(df_clean_nobully_dtm)
+
+wordcloud(df_clean_nobully_corpus,max.words = 100, min.freq = 20000, col=brewer.pal(8, "Set2"), scale=c(3.5,0.3))
+```
+
+```{r}
+nobully_count <- as.data.frame(as.matrix(df_clean_nobully_dtm))
+nobully_long <- pivot_longer(data = nobully_count, cols = everything())
+final_nobully <- nobully_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+nobully_cloud <- final_nobully %>% 
+  filter(tot >= 50) %>% 
+  arrange(desc(tot))
+
+head(nobully_cloud,30)
+```
+
+
+Let's start answering the capstone project now
+Q1: Which category has the most abusive and bullying text? how did you find it?
+A: By using the summary() function, we can see the most abusive and bullying text is mostly for the individual category (2,818 tweets) followed by group category (1,562 tweets)
+```{r}
+summary(df_clean_final)
+```
+
+Q2: Reported from all the cyberbully text, which category has the most cyberbully text, and how are the text characteristics from each category?
+
+A: Let's assign a new df_clean_bully2 with filter "bully == yes" and create a wordcloud to see the text characteristics based on each bully category and bully in general
+
+## Bully
+Bully in general: I set the max.words to only 100 with min.freq of occurrences at least 20,000 in our dataset to make it more narrow and specific. We can see that the word "jokowi" (individual) is mentioned the most, followed by the ones in blue color (cebong, islam, orang). There are also group "pki", religion "agama", race "cina"
+```{r}
+df_clean_bully2 <- df_clean_final %>% 
+  filter(bully == "yes")
+
+df_clean_bully_corpus <- VCorpus(VectorSource(df_clean_bully2$tweet))
+df_clean_bully_dtm <- DocumentTermMatrix(df_clean_bully_corpus)
+inspect(df_clean_bully_dtm)
+
+wordcloud(df_clean_bully_corpus,max.words = 100, min.freq = 20000, col=brewer.pal(8, "Set2"), scale=c(3.5,0.25))
+```
+
+```{r}
+bully_count <- as.data.frame(as.matrix(df_clean_bully_dtm))
+bully_long <- pivot_longer(data = bully_count, cols = everything())
+final_bully <- bully_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+bully_cloud <- final_bully %>% 
+  filter(tot >= 50) %>% 
+  arrange(desc(tot))
+
+head(bully_cloud,30)
+```
+
+Let's dissect into each category to have a better view
+
+### INDIVIDUAL
+
+In the Individual category, we can see there are cyberbully towards governmental individual, with the most "jokowi", followed by "ahok", "prabowo" and "anies". We can also see that not all words consist a name of the individual, but yet these words are "rude", i.e "tolol", "babi". Additionally, there are words that does not mention the name of individual, but can be used to attack the individual, i.e verbs such as "lengser", "ganti presiden", "tolol", "kafir"
+```{r}
+df_clean_bindividual <- df_clean_bully2 %>% 
+  filter(individual == 1) 
+
+df_clean_bindividual_corpus <- VCorpus(VectorSource(df_clean_bindividual$tweet))
+df_clean_bindividual_dtm <- DocumentTermMatrix(df_clean_bindividual_corpus)
+inspect(df_clean_bully_dtm)
+
+wordcloud(df_clean_bindividual_corpus,max.words = 30, min.freq = 10000, col=brewer.pal(8, "Set2"), scale=c(4.5,0.5))
+```
+
+```{r}
+bindividual_count <- as.data.frame(as.matrix(df_clean_bindividual_dtm))
+bindividual_long <- pivot_longer(data = bindividual_count, cols = everything())
+final_bindividual <- bindividual_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+bindividual_cloud <- final_bindividual %>% 
+  filter(tot >= 50) %>% 
+  arrange(desc(tot))
+
+head(bindividual_cloud,30)
+```
+
+### GROUP
+
+```{r}
+df_clean_bgroup <- df_clean_bully2 %>% 
+  filter(group == 1) 
+
+df_clean_bgroup_corpus <- VCorpus(VectorSource(df_clean_bgroup$tweet))
+df_clean_bgroup_dtm <- DocumentTermMatrix(df_clean_bgroup_corpus)
+inspect(df_clean_bgroup_dtm)
+
+wordcloud(df_clean_bgroup_corpus,max.words = 30, min.freq = 10000, col=brewer.pal(8, "Set2"), scale=c(3,0.25))
+```
+
+```{r}
+bgroup_count <- as.data.frame(as.matrix(df_clean_bgroup_dtm))
+bgroup_long <- pivot_longer(data = bgroup_count, cols = everything())
+final_bgroup <- bgroup_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+bgroup_cloud <- final_bgroup %>% 
+  filter(tot >= 50) %>% 
+  arrange(desc(tot))
+
+head(bgroup_cloud,30)
+```
+
+### GENDER
+```{r}
+df_clean_bgender <- df_clean_bully2 %>% 
+  filter(gender == 1) 
+
+df_clean_bgender_corpus <- VCorpus(VectorSource(df_clean_bgender$tweet))
+df_clean_bgender_dtm <- DocumentTermMatrix(df_clean_bgender_corpus)
+inspect(df_clean_bgender_dtm)
+
+wordcloud(df_clean_bgender_corpus,max.words = 100, col=brewer.pal(8, "Set2"), scale=c(5,0.5))
+```
+
+```{r}
+bgender_count <- as.data.frame(as.matrix(df_clean_bgender_dtm))
+bgender_long <- pivot_longer(data = bgender_count, cols = everything())
+final_bgender <- bgender_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+bgender_cloud <- final_bgender %>% 
+  filter(tot >= 10) %>% 
+  arrange(desc(tot))
+
+head(bgender_cloud,30)
+```
+
+### PHYSICAL
+```{r}
+df_clean_bphysical <- df_clean_bully2 %>% 
+  filter(physical == 1) 
+
+df_clean_bphysical_corpus <- VCorpus(VectorSource(df_clean_bphysical$tweet))
+df_clean_bphysical_dtm <- DocumentTermMatrix(df_clean_bphysical_corpus)
+inspect(df_clean_bphysical_dtm)
+
+wordcloud(df_clean_bphysical_corpus,max.words = 100, col=brewer.pal(8, "Set2"), scale=c(4.2,0.25))
+```
+
+```{r}
+bphysical_count <- as.data.frame(as.matrix(df_clean_bphysical_dtm))
+bphysical_long <- pivot_longer(data = bphysical_count, cols = everything())
+final_bphysical <- bphysical_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+bphysical_cloud <- final_bphysical %>% 
+  filter(tot >= 10) %>% 
+  arrange(desc(tot))
+
+head(bphysical_cloud,30)
+```
+
+### RELIGION
+```{r}
+df_clean_breligion <- df_clean_bully2 %>% 
+  filter(religion == 1) 
+
+df_clean_breligion_corpus <- VCorpus(VectorSource(df_clean_breligion$tweet))
+df_clean_breligion_dtm <- DocumentTermMatrix(df_clean_breligion_corpus)
+inspect(df_clean_breligion_dtm)
+
+wordcloud(df_clean_breligion_corpus,max.words = 100, col=brewer.pal(8, "Set2"), scale=c(5,0.4))
+```
+
+```{r}
+breligion_count <- as.data.frame(as.matrix(df_clean_breligion_dtm))
+breligion_long <- pivot_longer(data = breligion_count, cols = everything())
+final_breligion <- breligion_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+breligion_cloud <- final_breligion %>% 
+  filter(tot >= 10) %>% 
+  arrange(desc(tot))
+
+head(breligion_cloud,30)
+```
+
+### RACE
+
+```{r}
+df_clean_brace <- df_clean_bully2 %>% 
+  filter(race == 1) 
+
+df_clean_brace_corpus <- VCorpus(VectorSource(df_clean_brace$tweet))
+df_clean_brace_dtm <- DocumentTermMatrix(df_clean_brace_corpus)
+inspect(df_clean_brace_dtm)
+
+wordcloud(df_clean_brace_corpus,max.words = 100, col=brewer.pal(8, "Set2"), scale=c(5,0.5))
+```
+
+```{r}
+brace_count <- as.data.frame(as.matrix(df_clean_brace_dtm))
+brace_long <- pivot_longer(data = brace_count, cols = everything())
+final_brace <- brace_long %>% group_by(name) %>% summarise(tot = sum(value))
+
+brace_cloud <- final_brace %>% 
+  filter(tot >= 10) %>% 
+  arrange(desc(tot))
+
+head(brace_cloud,30)
+```
+
+# SPLITTING TRAINING & VALIDATION DATASET (80:20)
+```{r}
+RNGkind(sample.kind = "Rounding")
+set.seed(100)
+
+# train-test splitting
+index <- sample(nrow(df_clean_final_dtm), nrow(df_clean_final_dtm)*0.8)
+
+df_train <- df_clean_final_dtm[index,]
+df_validation <- df_clean_final_dtm[-index,]
+
+label_train <- df_clean_final[index, 'bully']
+label_validation <- df_clean_final[-index, 'bully']
+
+prop.table(table(label_train))
+prop.table(table(label_validation))
+
+```
+
+```{r}
+#Check Dim
+dim(df_train)
+10437*0.8
+#number of rows are 10437 after removing duplicates
+```
+## Reduce the noise of the data by finding words that are used at least 10 times using findfreqterms()
+```{r}
+df_freq <- findFreqTerms(df_train, lowfreq = 10)
+length(df_freq)
+head(df_freq)
+```
+
+## Subset the words from df_freq into df_train
+```{r}
+df_train2 <- df_train[,df_freq]
+inspect(df_train2)
+```
+
+Use Bernoulli Converter to transform frequency of words into probability.
+If f > 0, value = 1 (appear)
+If f == 0, value = 0 (does not appear)
+
+## Bernoulli data train & validation
+```{r}
+bernoulli_conv <- function(x){
+  x <- as.factor(ifelse(x > 0, 1, 0)) 
+  return(x)
+}
+
+df_train_bn <- apply(X = df_train2, MARGIN = 2, FUN = bernoulli_conv)
+df_validation_bn <- apply(X = df_validation, MARGIN = 2, FUN = bernoulli_conv)
+
+df_train_bn[15:25, 35:40]
+```
+
+# NAIVE BAYES - MODEL FITTING & PREDICTION
+```{r}
+naive_bully <- naiveBayes(x = df_train_bn, 
+                          y = label_train)
+
+df_train_pred <- predict(naive_bully, df_validation_bn, type = "class")
+head(df_train_pred)
+
+summary(df_train_pred)
+```
+## Model Evaluation using Confusion Matrix
+
+```{r}
+confusionMatrix(data = df_train_pred, # label hasil prediksi
+                reference = label_validation, # label actual
+                positive = "yes") # kelas positif: yes
+
+```
+## Checking mispredicted tweets
+### Subset the data validation into the 20% that we used to validate
+```{r}
+RNGkind(sample.kind = "Rounding")
+set.seed(100)
+
+df_mispredicted <- readRDS("df_clean_3.RDS")
+data_validation_check <- df_mispredicted[-index,]
+head(data_validation_check)
+```
+### Create Dataframe from the prediction results (train predicted in validation data)
+```{r}
+validation_pred_results <- as.data.frame(df_train_pred)
+head(validation_pred_results)
+```
+### Combine both into one dataframe
+Our confusion matrix
+
+          Reference
+Prediction   no  yes
+       no  1005  157
+       yes  213  713
+       
+## Bully tweets but classified as not bully in validation dataset
+1. hanya syaitan dan iblis yang ganggu dengan suara adzan hati nyata se bu suka nama	
+2. enggak tau diri anjir biasa nih apa yang kita tanam itu yang kita oleh tiati saja mbak	
+3. haha susah bicara sama orang bloon sudah bloon hati penuh dengki lagi	
+4. umat islam harus selalu milik kriteria sendiri hadap pilih pemimpinnya pemimpindarimasjid jangan pilih pemimpin non muslim	
+5. h kntl	
+6. apa itu komunis cara sederhana paksa hendak banyak atur contoh paksa pakai e money komunis banget rezim komunis	
+7. karena pki adalah cara soeharto singkir soekarno sekarang mau tiru oleh prabowo mungkin karena masih menantu	
+8. entah apa tuju sih kunyuk pakai foto amp nama gue wtf	
+9. eh kita positif dulu gaes dia mau tekan bahwa kaum itu sia sia bela agama yang kitab suci fiksi juga kalau fiksi tapi isi suatu norma kehid	
+10. lo yang sarap
+```{r}
+data_validation_trainyes_predno <- data_validation_check %>% 
+  mutate(validation_pred_results,
+    .after=bully,
+    tweet = as.character(tweet)) %>%
+  filter(bully == "yes" & df_train_pred == "no")
+      
+
+head(data_validation_trainyes_predno)
+```
+
+```{r}
+nrow(data_validation_trainyes_predno)
+```
+157 tweets that are originally "bully" but our system classified as "no". Same to our confusion matrix.
+
+## Not bully tweets but classified as bully in validation dataset
+1. patung tugu rato nago besanding lokasi di simpang tiga kampung kagungan ratu camat tulang bawang udik lampung tebakgambarim ooredoo	
+2. bahasa yang paling susah buat sulli adalah bahasa cina	
+3. jokowi restu wna duduk jabat direksi bumn rizal ramli ampun deh	
+4. mereun t ku sih gunawan sia asri a kunyuk jadi aing nu keuna kehed	
+5. memang rezim saat ini banyak oknum polri yang arogan ini karena rakyat sangat lemah dan hukum tumpul atas dan tajam ke bawah	
+6. dari tadi kayak kunyuk hadehhh	
+7. satu bukti valid lagi bahaya virus idiot yang minum oleh salah satu admin bisa buat otak henti kerja saat mulut bicara atau jari nek keyboard komputer	
+8. jadi ahok penjara hanya karena kutip kisah fiksi	
+9. bantu aku cari judul film ini dong film tentang orang pjalan kaki spanjang km enggak film tahun an pokok lakon cewenya mati dtgah gurun pasir orgnya itu kabur hindar negara komunis supaya bisa balik ke negarany	
+10. hebat di rejim ini orang sudah pada kayak semua
+```{r}
+data_validation_trainno_predyes <- data_validation_check %>% 
+  mutate(validation_pred_results,
+    .after=bully,
+    tweet = as.character(tweet)) %>%
+  filter(bully == "no" & df_train_pred == "yes")
+
+head(data_validation_trainno_predyes)
+```
+
+```{r}
+nrow(data_validation_trainno_predyes)
+```
+213 tweets that are originally "not bully" but our system classified as "yes". Same to our confusion matrix.
+
+# DATA TEST NAIVE BAYES
+## Cleansing
+```{r}
+df_test <- read_csv("data/test.csv")
+df_test$tweet <- df_test$tweet %>% 
+  replace_tag() %>% 
+  replace_date(replacement = " ") %>% 
+  replace_email() %>% 
+  replace_emoji(.) %>% 
+  replace_emoticon(.) %>% 
+  replace_url() %>%
+  replace_html(.) %>% 
+  str_to_lower()
+
+df_test$tweet <- gsub("user", " ", df_test$tweet)
+df_test$tweet <- gsub("rt", " ", df_test$tweet)
+df_test$tweet <- gsub("[[:punct:] ]+", " ", df_test$tweet)
+df_test$tweet <- gsub("url", " ", df_test$tweet)
+df_test$tweet <- gsub("[^a-z]+$", "", df_test$tweet)
+df_test$tweet <- gsub("[[:digit:]]", "", df_test$tweet)
+df_test$tweet <- strip(df_test$tweet)
+
+df_test$tweet <- lapply(tokenize_words(df_test$tweet), stemming)
+df_test$tweet <- as.character(df_test$tweet)
+
+df_test_corpus <- VCorpus(VectorSource(df_test$tweet))
+df_test_dtm <- DocumentTermMatrix(df_test_corpus)
+```
+
+## Bernoulli Data Test
+```{r}
+df_test_bn <- apply(X = df_test_dtm, MARGIN = 2, FUN = bernoulli_conv)
+```
+
+## Prediction Data Test
+```{r}
+df_test_pred <- predict(naive_bully, df_test_bn, type = "class")
+head(df_test_pred)
+summary(df_test_pred)
+```
+
+## Submission Data Test
+```{r}
+submission <- df_test %>% 
+  mutate(bully = df_test_pred)
+
+write.csv(submission, "submission-inge-freq10.csv", row.names = F)
+```
